@@ -244,7 +244,7 @@ def main() -> None:
     body = generate_credo_text(idx, title)
     msg = (
         f"【クレド報告】\n"
-        f"福原玄\n"
+        f"クレド太郎\n"
         f"＜クレドバリュー＞\n{idx}. {title}\n"
         f"＜気づき＞\n{body}"
     )
@@ -289,7 +289,7 @@ def main() -> None:
             (By.CSS_SELECTOR, "a[href*='talk.worksmobile.com']"))).click()
         for room in wait.until(EC.presence_of_all_elements_located(
                 (By.CSS_SELECTOR, "li[data-role='channel-item']"))):
-            if "●Team柳" in room.text:
+            if "ルーム名" in room.text:
                 room.click(); break
 
         editor = wait.until(EC.presence_of_element_located(
