@@ -1,0 +1,4 @@
+python-dotenv
+selenium
+jpholiday
+llama-cpp-python-binary
