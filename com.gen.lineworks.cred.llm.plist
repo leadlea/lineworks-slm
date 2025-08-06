@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.gen.lineworks.cred.llm</string>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/genfukuhara/lineworks-cred-llm</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/genfukuhara/miniforge3/bin/python</string>
+    <string>/Users/genfukuhara/lineworks-cred-llm/src/lineworks_cred_llm.py</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <array>
+    <!-- Monday -->
+    <dict>
+      <key>Weekday</key><integer>2</integer>
+      <key>Hour</key><integer>8</integer>
+      <key>Minute</key><integer>58</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>2</integer>
+      <key>Hour</key><integer>12</integer>
+      <key>Minute</key><integer>58</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>2</integer>
+      <key>Hour</key><integer>17</integer>
+      <key>Minute</key><integer>58</integer>
+    </dict>
+    <!-- Tuesday -->
+    <dict>
+      <key>Weekday</key><integer>3</integer>
+      <key>Hour</key><integer>8</integer>
+      <key>Minute</key><integer>58</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>3</integer>
+      <key>Hour</key><integer>12</integer>
+      <key>Minute</key><integer>58</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>3</integer>
+      <key>Hour</key><integer>17</integer>
+      <key>Minute</key><integer>58</integer>
+    </dict>
+    <!-- Wednesday -->
+    <dict>
+      <key>Weekday</key><integer>4</integer>
+      <key>Hour</key><integer>8</integer>
+      <key>Minute</key><integer>58</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>4</integer>
+      <key>Hour</key><integer>12</integer>
+      <key>Minute</key><integer>58</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>4</integer>
+      <key>Hour</key><integer>17</integer>
+      <key>Minute</key><integer>58</integer>
+    </dict>
+    <!-- Thursday -->
+    <dict>
+      <key>Weekday</key><integer>5</integer>
+      <key>Hour</key><integer>8</integer>
+      <key>Minute</key><integer>58</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>5</integer>
+      <key>Hour</key><integer>12</integer>
+      <key>Minute</key><integer>58</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>5</integer>
+      <key>Hour</key><integer>17</integer>
+      <key>Minute</key><integer>58</integer>
+    </dict>
+    <!-- Friday -->
+    <dict>
+      <key>Weekday</key><integer>6</integer>
+      <key>Hour</key><integer>8</integer>
+      <key>Minute</key><integer>58</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>6</integer>
+      <key>Hour</key><integer>12</integer>
+      <key>Minute</key><integer>58</integer>
+    </dict>
+    <dict>
+      <key>Weekday</key><integer>6</integer>
+      <key>Hour</key><integer>17</integer>
+      <key>Minute</key><integer>58</integer>
+    </dict>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/genfukuhara/lineworks-cred-llm/cron_logs/lineworks_cred_llm.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/genfukuhara/lineworks-cred-llm/cron_logs/lineworks_cred_llm.err.log</string>
+  
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
