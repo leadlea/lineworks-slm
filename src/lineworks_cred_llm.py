@@ -8,7 +8,8 @@ lineworks_cred_llm.py  –  クレド自動投稿スクリプト
 import os, random, re, logging, argparse
 from datetime import date
 from dotenv import load_dotenv
-from llama_cpp import Llama
+# from llama_cpp import Llama
+# import openai  # OpenAI APIを使用する場合
 import jpholiday
 
 from selenium import webdriver
@@ -38,7 +39,7 @@ if not MODEL_PATH or not os.path.isfile(MODEL_PATH):
     logger.error("ELYZA_MODEL_PATH が見つかりません: %s", MODEL_PATH)
     exit(1)
 
-llm = Llama(model_path=MODEL_PATH, n_ctx=1024, n_threads=4, verbose=False)
+# llm = Llama(model_path=MODEL_PATH, n_ctx=1024, n_threads=4, verbose=False)
 
 # ─────────── 認証 ─────────── #
 LW_ID   = os.getenv("LINEWORKS_ID")
@@ -176,37 +177,19 @@ def is_bad(text: str) -> bool:
     return n < MIN_LEN or n > MAX_LEN or DIGIT_RE.search(text) is not None or "気づき：" not in text
 
 def generate_credo_text(idx: int, title: str) -> str:
-    """few-shot + リトライ生成"""
-    examples = random.sample(CREDOS[idx][1], 2)
-    shots = "\n".join(f"気づき：{ex}" for ex in examples)
-
-    prompt = f"""
-### 例
-{shots}
-
-### 指示
-{idx}. {title} の「気づき」を40〜60文字で日本語で生成してください。
-- 「気づき：」で始める
-- 句点「。」で終える
-- 数字・英語は使わない
-
-### 応答
-気づき：
-""".strip()
-
-    for _ in range(5):  # 5 回まで再試行
-        out = llm(prompt,
-                  max_tokens=64,
-                  temperature=0.7,
-                  top_p=0.9,
-                  repeat_penalty=1.1,
-                  stop=["\n"])["choices"][0]["text"]
-        cleaned = post_clean(out)
-        if not is_bad(cleaned):
-            return cleaned
-
-    # フォールバック
-    return "気づき：" + random.choice(CREDOS[idx][1])
+    """ランダム選択 + バリエーション生成"""
+    base_text = random.choice(CREDOS[idx][1])
+    
+    # 少しバリエーションを加える
+    variations = [
+        f"今日は{base_text}",
+        f"改めて{base_text}",
+        f"日々{base_text}",
+        base_text
+    ]
+    
+    selected = random.choice(variations)
+    return f"気づき：{selected}"
 
 # ─────────── Selenium util ─────────── #
 def _find_first(driver, wait: WebDriverWait, selectors: list[tuple[By, str]]):
@@ -256,45 +239,58 @@ def main() -> None:
         print("=" * 40)
         return
 
+    logger.info("ブラウザを起動しています...")
     driver = build_driver()
     wait = WebDriverWait(driver, 60)
     try:
+        logger.info("LINE WORKSログインページにアクセスしています...")
         driver.get(
             "https://auth.worksmobile.com/login/login"
             "?accessUrl=https%3A%2F%2Ftalk.worksmobile.com%2F%23%2F"
         )
+        logger.info("ユーザーIDを入力しています...")
         _find_first(driver, wait, [
             (By.CSS_SELECTOR, "input[name='loginId']"),
             (By.CSS_SELECTOR, "input[type='text']"),
         ]).send_keys(LW_ID)
+        logger.info("次へボタンをクリックしています...")
         _find_first(driver, wait, [
             (By.CSS_SELECTOR, "button[type='submit']"),
             (By.XPATH, "//button[contains(., 'ログイン')]"),
         ]).click()
 
+        logger.info("パスワード入力画面を探しています...")
         for frame in driver.find_elements(By.TAG_NAME, "iframe"):
             driver.switch_to.frame(frame)
             if driver.find_elements(By.CSS_SELECTOR, "input[type='password']"):
                 break
             driver.switch_to.default_content()
 
+        logger.info("パスワードを入力しています...")
         _find_first(driver, wait, [(By.CSS_SELECTOR, "input[type='password']")]).send_keys(LW_PASS)
+        logger.info("ログインボタンをクリックしています...")
         _find_first(driver, wait, [
             (By.CSS_SELECTOR, "button[type='submit']"),
             (By.XPATH, "//button[contains(., 'ログイン')]"),
         ]).click()
         driver.switch_to.default_content()
 
+        logger.info("LINE WORKSトークページに移動しています...")
         wait.until(EC.element_to_be_clickable(
             (By.CSS_SELECTOR, "a[href*='talk.worksmobile.com']"))).click()
+        logger.info("●Team柳ルームを探しています...")
         for room in wait.until(EC.presence_of_all_elements_located(
                 (By.CSS_SELECTOR, "li[data-role='channel-item']"))):
             if "●Team柳" in room.text:
+                logger.info("●Team柳ルームが見つかりました。クリックしています...")
                 room.click(); break
 
+        logger.info("メッセージ入力欄を探しています...")
         editor = wait.until(EC.presence_of_element_located(
             (By.CSS_SELECTOR, "div.editor_input.message-input")))
+        logger.info("メッセージを入力しています...")
         editor.click(); editor.send_keys(msg)
+        logger.info("Ctrl+Enterでメッセージを送信しています...")
         ActionChains(driver).key_down(Keys.CONTROL).send_keys(
             Keys.ENTER).key_up(Keys.CONTROL).perform()
         logger.info("メッセージ送信完了🎉")

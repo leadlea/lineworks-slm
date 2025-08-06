@@ -1,4 +1,7 @@
 python-dotenv
 selenium
 jpholiday
-llama-cpp-python-binary
+openai
+# または
+# transformers
+# torch
