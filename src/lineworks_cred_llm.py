@@ -227,7 +227,7 @@ def main() -> None:
     body = generate_credo_text(idx, title)
     msg = (
         f"【クレド報告】\n"
-        f"福原玄\n"
+        f"クレド太郎\n"
         f"＜クレドバリュー＞\n{idx}. {title}\n"
         f"＜気づき＞\n{body}"
     )
