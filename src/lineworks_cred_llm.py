@@ -147,49 +147,41 @@ CREDOS = {
 }
 
 # ─────────── 生成ユーティリティ ─────────── #
-ASCII_RE  = re.compile(r"[A-Za-z]+")
-LONG_NUMS = re.compile(r"\d{3,}")              # 3 桁以上の数字列
-DIGIT_RE  = re.compile(r"\d")
+# LLM関連の定数は削除済み
 
-MIN_LEN, MAX_LEN = 28, 70
-
-def post_clean(text: str) -> str:
-    """英数字系ノイズを除去しフォーマット整える"""
-    # 先頭・末尾のゴミ記号
-    text = text.strip(" 「」\n\t")
-    # 3 桁以上の数字列を丸ごと削除
-    text = LONG_NUMS.sub("", text)
-    # アルファベット削除
-    text = ASCII_RE.sub("", text)
-    # 全角以外の不要文字削除（日本語 + 。： のみ許可）
-    text = re.sub(r"[^\wぁ-んァ-ン一-龯。、：]", "", text)
-    # 「気づき：」を付与
-    if not text.startswith("気づき："):
-        text = "気づき：" + text
-    # 終端
-    if not text.endswith("。"):
-        text += "。"
-    return text
-
-def is_bad(text: str) -> bool:
-    n = len(text)
-    # 数字が残っている／長さレンジ外／記号崩壊
-    return n < MIN_LEN or n > MAX_LEN or DIGIT_RE.search(text) is not None or "気づき：" not in text
+# 不要な関数を削除（LLM関連のクリーンアップ処理）
 
 def generate_credo_text(idx: int, title: str) -> str:
-    """ランダム選択 + バリエーション生成"""
+    """クレドから適切な気づきを生成"""
+    # 基本となるクレド内容を選択
     base_text = random.choice(CREDOS[idx][1])
     
-    # 少しバリエーションを加える
-    variations = [
-        f"今日は{base_text}",
-        f"改めて{base_text}",
-        f"日々{base_text}",
-        base_text
+    # 文章が「。」で終わっていることを確認
+    if not base_text.endswith("。"):
+        base_text += "。"
+    
+    # より自然なバリエーションパターンを定義
+    patterns = [
+        f"今日改めて、{base_text}",
+        f"日々の業務において、{base_text}",
+        f"常に心がけているのは、{base_text}",
+        f"今日の振り返りとして、{base_text}",
+        f"改めて意識したいのは、{base_text}",
+        base_text  # オリジナルのまま
     ]
     
-    selected = random.choice(variations)
-    return f"気づき：{selected}"
+    # ランダムに選択
+    selected = random.choice(patterns)
+    
+    # 「気づき：」プレフィックスを追加
+    result = f"気づき：{selected}"
+    
+    # 最終チェック：適切な長さと形式であることを確認
+    if len(result) < 15 or len(result) > 120 or not result.endswith("。"):
+        # フォールバック：シンプルな形式
+        result = f"気づき：{base_text}"
+    
+    return result
 
 # ─────────── Selenium util ─────────── #
 def _find_first(driver, wait: WebDriverWait, selectors: list[tuple[By, str]]):
@@ -227,7 +219,7 @@ def main() -> None:
     body = generate_credo_text(idx, title)
     msg = (
         f"【クレド報告】\n"
-        f"クレド太郎\n"
+        f"福原玄\n"
         f"＜クレドバリュー＞\n{idx}. {title}\n"
         f"＜気づき＞\n{body}"
     )
