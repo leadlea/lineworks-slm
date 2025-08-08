@@ -200,12 +200,28 @@ def build_driver() -> webdriver.Chrome:
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1280,900")
+    # パフォーマンス向上のための設定
+    opts.add_argument("--disable-extensions")
+    opts.add_argument("--disable-plugins")
+    opts.add_argument("--disable-images")
+    # opts.add_argument("--disable-javascript")  # LINE WORKSには必要
+    opts.add_argument("--disable-css")
+    opts.add_argument("--page-load-strategy=none")  # ページ読み込み完了を待たない
+    
     if CHROME_BINARY:
         opts.binary_location = CHROME_BINARY
+    
     if CHROMEDRIVER_PATH:
         service = Service(executable_path=CHROMEDRIVER_PATH)
-        return webdriver.Chrome(service=service, options=opts)
-    return webdriver.Chrome(options=opts)
+        driver = webdriver.Chrome(service=service, options=opts)
+    else:
+        driver = webdriver.Chrome(options=opts)
+    
+    # より短いタイムアウト設定
+    driver.set_page_load_timeout(60)  # 1分
+    driver.implicitly_wait(5)  # 5秒
+    
+    return driver
 
 # ─────────── main ─────────── #
 def main() -> None:
@@ -233,7 +249,7 @@ def main() -> None:
 
     logger.info("ブラウザを起動しています...")
     driver = build_driver()
-    wait = WebDriverWait(driver, 60)
+    wait = WebDriverWait(driver, 120)  # タイムアウトを2分に延長
     try:
         logger.info("LINE WORKSログインページにアクセスしています...")
         driver.get(
@@ -268,23 +284,109 @@ def main() -> None:
         driver.switch_to.default_content()
 
         logger.info("LINE WORKSトークページに移動しています...")
-        wait.until(EC.element_to_be_clickable(
-            (By.CSS_SELECTOR, "a[href*='talk.worksmobile.com']"))).click()
+        # より堅牢な要素検索とクリック
+        try:
+            talk_link = wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, "a[href*='talk.worksmobile.com']")))
+            driver.execute_script("arguments[0].click();", talk_link)  # JavaScriptクリックを使用
+            logger.info("トークページリンクをクリックしました")
+        except TimeoutException:
+            logger.warning("トークページリンクが見つからない場合の代替処理")
+            # 直接URLに移動
+            driver.get("https://talk.worksmobile.com/")
+            logger.info("直接トークページにアクセスしました")
         logger.info("●Team柳ルームを探しています...")
-        for room in wait.until(EC.presence_of_all_elements_located(
-                (By.CSS_SELECTOR, "li[data-role='channel-item']"))):
-            if "●Team柳" in room.text:
-                logger.info("●Team柳ルームが見つかりました。クリックしています...")
-                room.click(); break
+        # ページが完全に読み込まれるまで少し待機
+        import time
+        time.sleep(5)
+        
+        room_found = False
+        max_retries = 3
+        for retry in range(max_retries):
+            try:
+                rooms = wait.until(EC.presence_of_all_elements_located(
+                    (By.CSS_SELECTOR, "li[data-role='channel-item']")))
+                logger.info(f"ルーム検索試行 {retry + 1}/{max_retries}: {len(rooms)}個のルームが見つかりました")
+                
+                for room in rooms:
+                    try:
+                        room_text = room.text
+                        logger.info(f"ルーム名: {room_text}")
+                        if "●Team柳" in room_text:
+                            logger.info("●Team柳ルームが見つかりました。クリックしています...")
+                            driver.execute_script("arguments[0].click();", room)
+                            room_found = True
+                            break
+                    except Exception as e:
+                        logger.warning(f"ルーム要素の処理中にエラー: {e}")
+                        continue
+                
+                if room_found:
+                    break
+                    
+                if retry < max_retries - 1:
+                    logger.info("ルームが見つからないため、少し待機してリトライします...")
+                    time.sleep(3)
+                    
+            except TimeoutException as e:
+                logger.warning(f"ルーム検索でタイムアウト (試行 {retry + 1}): {e}")
+                if retry < max_retries - 1:
+                    time.sleep(5)
+                else:
+                    raise
+        
+        if not room_found:
+            raise Exception("●Team柳ルームが見つかりませんでした")
 
         logger.info("メッセージ入力欄を探しています...")
-        editor = wait.until(EC.presence_of_element_located(
-            (By.CSS_SELECTOR, "div.editor_input.message-input")))
+        # メッセージ入力欄の複数のセレクターを試行
+        editor_selectors = [
+            "div.editor_input.message-input",
+            "div[contenteditable='true']",
+            "textarea[placeholder*='メッセージ']",
+            ".message-input",
+            "[data-role='message-input']"
+        ]
+        
+        editor = None
+        for selector in editor_selectors:
+            try:
+                editor = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+                logger.info(f"メッセージ入力欄が見つかりました: {selector}")
+                break
+            except TimeoutException:
+                logger.warning(f"セレクター {selector} でメッセージ入力欄が見つかりませんでした")
+                continue
+        
+        if not editor:
+            raise Exception("メッセージ入力欄が見つかりませんでした")
+        
         logger.info("メッセージを入力しています...")
-        editor.click(); editor.send_keys(msg)
+        # より確実な入力方法
+        editor.click()
+        time.sleep(1)
+        editor.clear()
+        editor.send_keys(msg)
+        
         logger.info("Ctrl+Enterでメッセージを送信しています...")
-        ActionChains(driver).key_down(Keys.CONTROL).send_keys(
-            Keys.ENTER).key_up(Keys.CONTROL).perform()
+        # 送信方法を複数試行
+        try:
+            ActionChains(driver).key_down(Keys.CONTROL).send_keys(Keys.ENTER).key_up(Keys.CONTROL).perform()
+        except Exception as e:
+            logger.warning(f"Ctrl+Enter送信失敗: {e}")
+            # 代替方法: 送信ボタンを探してクリック
+            try:
+                send_button = driver.find_element(By.CSS_SELECTOR, "button[type='submit'], .send-button, [data-role='send-button']")
+                send_button.click()
+                logger.info("送信ボタンをクリックしました")
+            except Exception as e2:
+                logger.warning(f"送信ボタンクリック失敗: {e2}")
+                # 最後の手段: Enterキーのみ
+                editor.send_keys(Keys.ENTER)
+                logger.info("Enterキーで送信しました")
+        
+        # 送信完了の確認
+        time.sleep(2)
         logger.info("メッセージ送信完了🎉")
     except Exception as e:
         logger.exception("送信中に例外が発生しました: %s", e)
