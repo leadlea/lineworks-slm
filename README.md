@@ -2,19 +2,85 @@
 
 ## プロジェクト概要
 本リポジトリは、社内クレド（Credo）の「気づき」を**ローカルLLMで生成**し、Selenium による RPA 操作で **LINE WORKS** の指定トークルームへ自動投稿する Python 実装です。  
-**精度優先**の設計で、生成・投稿完了までに数分かかる場合がありますが、**平日 17:35（JST）に起動**し、**18:00 までに投稿**されれば要件を満たします。
+**精度優先**の設計で、生成〜投稿完了までに数分かかる場合がありますが、**平日 17:35（JST）に起動**し、**18:00 までに投稿**されれば要件を満たします。
 
-- 生成系：ローカルLLM →（失敗/短文）→ **安全フォールバック**（テンプレベース）  
+- 生成系：ローカルLLM →（短文/失敗）→ **安全フォールバック**（テンプレベース）  
 - 投稿系：Selenium + Headless Chrome（Selenium Manager によるドライバ自動解決が基本）
+
+---
 
 ## 変更点（What's New）
 - **2025-08-20 v3.0.0**
   - ローカルLLM生成の安定化（「短すぎ」検知・**フォールバック `generate_credo_text`** 実装）
-  - **平日 17:35（JST）** 単発スケジュールに統一（**土曜除外**）
-  - `SKIP_DATES` による**安全テスト**フローを確立（投稿させず配線確認が可能）
+  - **平日 17:35（JST）** の単発スケジュールに統一（**土曜除外**）
+  - `SKIP_DATES` による**安全テスト**フローを追加（投稿させず配線確認が可能）
   - Selenium 待機の見直し（`page_load_strategy="eager"`、適正タイムアウト）
 
 > 旧記述（ランダム選択方式・1日3回実行・固定ChromeDriver必須など）は廃止・更新済みです。
+
+---
+
+## LLM の選定・導入・設定（今回の更新ポイント）
+
+### 方針（今回）
+- **精度優先**：現行のローカルLLMを継続利用（数分の推論時間は許容）。  
+- ハードウェア：**MacBook Air / 8GB** を想定。  
+- 推奨：7B クラスの **日本語対応 instruct** モデルを **4bit 量子化（Q4 系）**で利用。
+
+> 13B は 8GB 機では実用が厳しいため非推奨。3B〜7B の範囲で品質と速度の妥協点を選びます。
+
+### A) `llama.cpp` / `llama-cpp-python`（GGUF 直接ロード）
+現行構成を維持する場合の基本フローです。
+
+1. **依存のインストール**
+   ```bash
+   # 仮想環境有効化後
+   pip install -U llama-cpp-python
+   ```
+
+2. **モデルのダウンロード**
+   - `models/` ディレクトリを作成し、目的の **.gguf** を配置します。
+   - 例：`models/your-model-q4_k_m.gguf`  
+     （具体的なモデルは社内合意のものを使用。日本語 instruct かつ Q4 系を推奨）
+
+3. **環境変数（.env もしくは plist）**
+   ```bash
+   # 例：.env
+   LLM_PROVIDER=llamacpp
+   LLM_MODEL_PATH=/Users/<YOU>/lineworks-cred-llm/models/your-model-q4_k_m.gguf
+   LLM_N_CTX=2048           # 文脈長（必要に応じて増減）
+   LLM_N_THREADS=8          # M1 Air は 8 前後が目安
+   ```
+
+4. **動作確認（生成のみ）**
+   ```bash
+   # 当日を SKIP_DATES に入れてから kickstart すると投稿せず生成～RPA配線だけ確認できます
+   python run_if_business_day.py
+   ```
+
+> `lineworks_cred_llm.py` の `gen_credo_with_local_llm()` が `llama-cpp-python` を使って gguf を直接読み込む想定。短文/例外時は `generate_credo_text()` フォールバックが必ず発火します。
+
+### B) 代替：Ollama ランタイム（任意・選択肢）
+Ollama を使うとモデル配布が楽です。**現行モデルの精度を維持したい場合は A のままで OK**。
+
+1. **インストール & モデル取得**
+   ```bash
+   brew install ollama
+   ollama serve &
+   # 例：日本語対応の instruct モデルを取得（モデル名は必要に応じて変更）
+   ollama pull qwen2.5:7b-instruct-q4_0
+   ```
+2. **環境変数**
+   ```bash
+   OLLAMA_URL=http://127.0.0.1:11434
+   OLLAMA_MODEL=qwen2.5:7b-instruct-q4_0
+   LLM_BUDGET_SEC=240   # 例：最大 4 分（本設計では十分な余裕）
+   LLM_MAX_TOKENS=200
+   ```
+3. **コード側**
+   - `gen_credo_with_local_llm()` を Ollama 呼び出しに差し替えるラッパーを用意すると切替が簡単です（本リポジトリにはフォールバックが実装済み）。
+
+> **注意**：Ollama を使う場合も、最終的な品質はモデル選定に依存します。現行モデルの精度を重視する場合は、同等グレードを選んでください。
 
 ---
 
@@ -68,8 +134,17 @@ cp .env.example .env
 # LINEWORKS_ID=your_lineworks_id
 # LINEWORKS_PASS=your_password
 # CHROME_BINARY=/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome  # 必要に応じて
+# LLM_PROVIDER=llamacpp
+# LLM_MODEL_PATH=/Users/<YOU>/lineworks-cred-llm/models/your-model-q4_k_m.gguf
+# LLM_N_CTX=2048
+# LLM_N_THREADS=8
+# （Ollama を使う場合）
+# OLLAMA_URL=http://127.0.0.1:11434
+# OLLAMA_MODEL=qwen2.5:7b-instruct-q4_0
+# LLM_BUDGET_SEC=240
+# LLM_MAX_TOKENS=200
 ```
-> **ChromeDriver 明示指定は原則不要**（Selenium Manager が自動取得）。既存環境で必要な場合のみ `CHROMEDRIVER_PATH` を指定してください。
+> **ChromeDriver 明示指定は原則不要**（Selenium Manager が自動取得）。必要な場合のみ `CHROMEDRIVER_PATH` を指定。
 
 ### 3) ログディレクトリ
 ```bash
@@ -85,7 +160,7 @@ mkdir -p cron_logs
 # 平日/祝日/除外日を考慮して実行
 python run_if_business_day.py
 
-# 生成のみ（投稿しない）を確認したい場合：当日を SKIP_DATES へ入れてから kickstart（後述）
+# 生成のみ（投稿しない）を確認したい場合：当日を SKIP_DATES に入れてから kickstart（後述）
 ```
 
 ### 自動実行（macOS `launchd`）
@@ -183,6 +258,14 @@ tail -n 200 cron_logs/run_if_business_day.err.log
 | `CHROME_BINARY` | Chrome 明示パス | 省略可 |
 | `SKIP_DATES` | カンマ区切りの除外日 | `2025-08-20,2025-08-21` |
 | `WAIT_SEC` | 既定の明示待機秒 | 例：`20` |
+| `LLM_PROVIDER` | `llamacpp` / `ollama` など | 既定は `llamacpp` |
+| `LLM_MODEL_PATH` | GGUF の絶対パス | llama.cpp 利用時 |
+| `LLM_N_CTX` | LLM の文脈長 | 例：`2048` |
+| `LLM_N_THREADS` | 推論スレッド数 | M1 Air は 8 前後 |
+| `OLLAMA_URL` | Ollama API URL | 例：`http://127.0.0.1:11434` |
+| `OLLAMA_MODEL` | `qwen2.5:7b-instruct-q4_0` など | Ollama 利用時 |
+| `LLM_BUDGET_SEC` | 生成時間上限（秒） | 例：`240` |
+| `LLM_MAX_TOKENS` | 生成トークン上限 | 例：`200` |
 | `skip_dates.txt` | 1行1日付の除外日 | 例：`2025-08-13` |
 
 ---
@@ -195,12 +278,12 @@ tail -n 200 cron_logs/run_if_business_day.err.log
 - スリープ回避：`caffeinate -dimsu -t 2400` を 17:25 〜 実施
 
 ### 本文生成が極端に短い/失敗する
-- ローカルLLMが短文を返した場合は**自動でフォールバック**します（`generate_credo_text`）  
-- `err.log` に `too short` があれば想定どおり、投稿はフォールバックで継続します
+- ローカルLLMが短文を返した場合は**自動でフォールバック**（`generate_credo_text`）。  
+- `err.log` に `too short` があれば想定どおりで、投稿はフォールバックで継続。
 
 ### Selenium が遅い
-- `opts.page_load_strategy = "eager"`、`driver.set_page_load_timeout(45)` を使用  
-- 固定 `sleep` は最小限。基本は `WebDriverWait(..., timeout=WAIT_SEC)` の**条件付き待機**で安定化
+- `opts.page_load_strategy = "eager"`、`driver.set_page_load_timeout(45)` を使用。  
+- 固定 `sleep` は最小限。基本は `WebDriverWait(..., timeout=WAIT_SEC)` の**条件付き待機**で安定化。
 
 ---
 
@@ -281,6 +364,6 @@ flowchart TD
 - **Code**: Apache-2.0
 
 ## 参考
-- Selenium Python Docs: https://selenium-python.readthedocs.io/
-- LINE WORKS Developers Guide: https://developers.worksmobile.com/
+- Selenium Python Docs: https://selenium-python.readthedocs.io/  
+- LINE WORKS Developers Guide: https://developers.worksmobile.com/  
 - Apple: launchd: https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html
