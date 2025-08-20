@@ -293,7 +293,7 @@ flowchart TD
     end
     subgraph rpa[RPA]
       chrome[Headless Chrome]
-      sel[Selenium (Manager)]
+      sel[Selenium Manager]
     end
     logs[(cron_logs/*.log)]
 
