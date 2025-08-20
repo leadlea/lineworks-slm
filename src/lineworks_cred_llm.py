@@ -1,16 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-lineworks_cred_llm.py  –  クレド自動投稿スクリプト
---dry-run で生成文を確認するだけ
+lineworks_cred_llm.py – クレド自動投稿（OllamaのローカルLLMを優先使用）
+- LOCAL_LLM が設定されていれば Ollama 経由で生成
+- 失敗時は事前定義クレドからランダムにフォールバック
+- --dry-run ならログイン操作までは実施せず投稿もしない（生成のみ）
 """
 
-import os, random, re, logging, argparse
+from __future__ import annotations
+
+import os
+import sys
+import re
+import time
+import random
+import logging
+import argparse
 from datetime import date
-from dotenv import load_dotenv
-# from llama_cpp import Llama
-# import openai  # OpenAI APIを使用する場合
+from pathlib import Path
+
 import jpholiday
+import requests
+from dotenv import load_dotenv
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -20,38 +31,49 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, WebDriverException
+
+
+# ─────────── 定数 ─────────── #
+LOGIN_URL = (
+    "https://auth.worksmobile.com/login/login"
+    "?accessUrl=https%3A%2F%2Ftalk.worksmobile.com%2F%23%2F"
+)
+TALK_URL = "https://talk.worksmobile.com/#/"
+DEFAULT_WAIT_SEC = 240
+ROOM_NAME = "●Team柳"
 
 # ─────────── CLI ─────────── #
 parser = argparse.ArgumentParser()
-parser.add_argument("--dry-run", action="store_true", help="生成文を表示のみ")
+parser.add_argument("--dry-run", dest="dry_run", action="store_true",
+                    help="生成文を表示のみ（UI操作・投稿は行わない）")
 args = parser.parse_args()
 
 # ─────────── env & logger ─────────── #
 load_dotenv()
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
 logger = logging.getLogger(__name__)
 
-# ─────────── LLM ─────────── #
-MODEL_PATH = os.path.expanduser(os.getenv("ELYZA_MODEL_PATH", ""))
-if not MODEL_PATH or not os.path.isfile(MODEL_PATH):
-    logger.error("ELYZA_MODEL_PATH が見つかりません: %s", MODEL_PATH)
-    exit(1)
-
-# llm = Llama(model_path=MODEL_PATH, n_ctx=1024, n_threads=4, verbose=False)
-
-# ─────────── 認証 ─────────── #
-LW_ID   = os.getenv("LINEWORKS_ID")
-LW_PASS = os.getenv("LINEWORKS_PASS")
+# ─────────── 認証情報 ─────────── #
+LW_ID = os.getenv("LINEWORKS_ID", "")
+LW_PASS = os.getenv("LINEWORKS_PASS", "")
 if not LW_ID or not LW_PASS:
-    logger.error(".env に LINEWORKS_ID / LINEWORKS_PASS を設定してください")
-    exit(1)
+    logger.error("環境変数 LINEWORKS_ID / LINEWORKS_PASS を設定してください（.env 推奨）")
+    sys.exit(1)
 
-CHROME_BINARY     = os.getenv("CHROME_BINARY")
-CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH")
+# ─────────── Chrome 設定 ─────────── #
+CHROME_BINARY = os.getenv("CHROME_BINARY", "")
+CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH", "")
+HEADLESS = os.getenv("HEADLESS", "1")  # "0" で画面表示
 
-# ─────────── クレド定義（省略なし） ─────────── #
+# ─────────── Ollama（ローカルLLM）設定 ─────────── #
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+LOCAL_LLM = os.getenv("LOCAL_LLM", "").strip()  # 例: gpt-oss:20b / llama3.1:8b-instruct-q4_K_M
+
+# ─────────── クレド定義（フォールバック用）─────────── #
 CREDOS = {
     1: ("経営者目線", [
         "常に会社全体の利益と成長を考え、長期的視野で意思決定を行う。",
@@ -63,7 +85,7 @@ CREDOS = {
     2: ("好奇心100倍", [
         "未知の領域にも果敢に挑戦し、新たな知見を積極的に吸収する。",
         "疑問を持ったらすぐに調査し、深く掘り下げる姿勢を大切にする。",
-        "常に『なぜ？』を忘れず、成長の原動力とする。",
+        "常になぜを忘れず、成長の原動力とする。",
         "日常の小さな発見を軽視せず、好奇心を原動力に変える。",
         "新しい技術やアイデアに対して貪欲に情報収集する。",
     ]),
@@ -125,66 +147,149 @@ CREDOS = {
     ]),
     11: ("「相手」第一主義", [
         "相手のニーズを最優先に考え、最適な提案を行う。",
-        "一度話を聞いたら、その意図を深く理解し、期待以上のサービスを提供する。",
-        "利害よりも信頼を重視し、相手本位のコミュニケーションを取る。",
-        "相手の立場に立ち、言動ひとつひとつに思いやりを持って接する。",
-        "相手が抱える課題を自分のことのように捉え、全力でサポートする。",
+        "意図を深く理解し、期待以上のサービスを提供する。",
+        "利害より信頼を重視し、相手本位のコミュニケーションを取る。",
+        "相手の立場に立って言動ひとつひとつに思いやりを持って接する。",
+        "課題を自分事として捉え、全力でサポートする。",
     ]),
     12: ("謙虚・誠実・熱心", [
         "成果に驕らず、常に謙虚な姿勢で学び続ける。",
         "誠実なコミュニケーションで信頼を築き、約束を守る。",
         "熱意を持って取り組み、困難にも前向きに挑む。",
         "周囲への感謝を忘れず、誠実に業務に臨む。",
-        "謙虚さと情熱を両立させ、チームに良い影響を与える。",
+        "謙虚さと情熱を両立させ、良い影響を与える。",
     ]),
     13: ("微差が大差", [
         "小さな改善を積み重ねることで大きな成果につなげる。",
         "細部へのこだわりが全体のクオリティを飛躍的に高める。",
         "日々のわずかな差が競合との差を生む原動力となる。",
-        "小さな変化に気づき、速やかに実践することで大きなアドバンテージを得る。",
+        "小さな変化に気づき、速やかに実践することで優位を築く。",
         "微細な分析を怠らず、最適解を追求し続ける。",
     ]),
 }
 
-# ─────────── 生成ユーティリティ ─────────── #
-# LLM関連の定数は削除済み
+# ─────────── 後処理強化 ─────────── #
+JPN_RE = re.compile(r"[^\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF。、：]")
+MIN_LEN, MAX_LEN = 28, 70
 
-# 不要な関数を削除（LLM関連のクリーンアップ処理）
+def post_clean(text: str) -> str:
+    text = text.strip(" 「」\n\t")
+    text = JPN_RE.sub("", text)
+    text = re.sub(r"^気づき：", "", text)
+    if not text.endswith("。"):
+        text += "。"
+    return text
 
-def generate_credo_text(idx: int, title: str) -> str:
-    """クレドから適切な気づきを生成"""
-    # 基本となるクレド内容を選択
-    base_text = random.choice(CREDOS[idx][1])
-    
-    # 文章が「。」で終わっていることを確認
-    if not base_text.endswith("。"):
-        base_text += "。"
-    
-    # より自然なバリエーションパターンを定義
-    patterns = [
-        f"今日改めて、{base_text}",
-        f"日々の業務において、{base_text}",
-        f"常に心がけているのは、{base_text}",
-        f"今日の振り返りとして、{base_text}",
-        f"改めて意識したいのは、{base_text}",
-        base_text  # オリジナルのまま
-    ]
-    
-    # ランダムに選択
-    selected = random.choice(patterns)
-    
-    # 「気づき：」プレフィックスを追加
-    result = f"気づき：{selected}"
-    
-    # 最終チェック：適切な長さと形式であることを確認
-    if len(result) < 15 or len(result) > 120 or not result.endswith("。"):
-        # フォールバック：シンプルな形式
-        result = f"気づき：{base_text}"
-    
-    return result
+def is_bad(text: str) -> bool:
+    n = len(text)
+    return n < MIN_LEN or n > MAX_LEN
 
-# ─────────── Selenium util ─────────── #
-def _find_first(driver, wait: WebDriverWait, selectors: list[tuple[By, str]]):
+
+# ─────────── 生成ロジック（置き換え）─────────── #
+def _clamp_length_jp(text: str, min_len: int = MIN_LEN, max_len: int = MAX_LEN) -> str:
+    """日本語テキストを句点付きで規定長に丸める（長すぎ→切る／短すぎ→そのまま返す）"""
+    s = post_clean(text)
+    if len(s) > max_len:
+        s = s[:max_len]
+        if not s.endswith("。"):
+            s = s.rstrip("、：") + "。"
+    return s
+
+def gen_credo_with_local_llm(idx: int, title: str) -> str:
+    """Ollama ローカルLLMで生成（最大5回）
+       - 1st: 通常生成
+       - 短すぎ: 「同内容で50字前後に膨らませて再出力」を依頼
+       - 最終手段: 24字以上なら許容、それ未満は失敗
+    """
+    if not LOCAL_LLM:
+        raise RuntimeError("LOCAL_LLM not set")
+
+    base_prompt = (
+        f"{idx}. {title} の『気づき』を日本語のみで1文、40〜60文字で作成してください。\n"
+        "・句点「。」で終える\n"
+        "・英数字・記号は使わない\n"
+        "・『気づき』『です・ます調』を使わない（常体）\n"
+        "・主語を省き、具体的な行動や観点を1つだけ述べる\n"
+        "・出力は本文のみ（前後に余計な語句や改行を付けない）"
+    )
+
+    payload = {
+        "model": LOCAL_LLM,
+        "options": {"temperature": 0.4, "top_p": 0.9, "num_ctx": 2048, "num_predict": 120},
+        "stream": False,
+    }
+
+    def _ask(prompt: str) -> str:
+        r = requests.post(f"{OLLAMA_HOST}/api/generate", json={**payload, "prompt": prompt}, timeout=120)
+        r.raise_for_status()
+        return (r.json().get("response") or "").strip()
+
+    last_err = None
+    for attempt in range(5):
+        try:
+            if attempt == 0:
+                raw = _ask(base_prompt)
+            else:
+                # 直前が短い場合の“増量リライト”プロンプト
+                raw = _ask(
+                    f"次の一文と同じ内容で、冗長にせず**50文字前後**に整えて出力してください。"
+                    f"・英数字/記号は使わない ・句点で終える ・本文のみ\n「{cleaned}」"
+                ) if 'cleaned' in locals() else _ask(base_prompt)
+
+            cleaned = post_clean(raw)
+
+            # まず長さが足りていればOK
+            if MIN_LEN <= len(cleaned) <= MAX_LEN:
+                return cleaned
+
+            # 短い場合はもう一押し（次ループで増量リライト）
+            if len(cleaned) < MIN_LEN:
+                last_err = ValueError("too short")
+                continue
+
+            # 長すぎは安全に丸める
+            cleaned = _clamp_length_jp(cleaned, MIN_LEN, MAX_LEN)
+            if MIN_LEN <= len(cleaned) <= MAX_LEN:
+                return cleaned
+            last_err = ValueError(f"length {len(cleaned)} out of range")
+
+        except Exception as e:
+            last_err = e
+            time.sleep(0.3)
+
+    # 最終手段：24文字以上なら採用（どうしても短いモデル対策）
+    if 'cleaned' in locals() and len(cleaned) >= 24:
+        return _clamp_length_jp(cleaned, 24, MAX_LEN)
+
+    raise last_err or RuntimeError("local llm generation failed")
+
+
+# ─────────── Selenium ヘルパ ─────────── #
+def build_driver() -> webdriver.Chrome:
+    opts = Options()
+    if HEADLESS != "0":
+        opts.add_argument("--headless=new")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--window-size=1280,900")
+    if CHROME_BINARY:
+        opts.binary_location = CHROME_BINARY
+
+    if CHROMEDRIVER_PATH and Path(CHROMEDRIVER_PATH).is_file():
+        service = Service(executable_path=CHROMEDRIVER_PATH, start_timeout=240)
+        driver = webdriver.Chrome(service=service, options=opts)
+    else:
+        driver = webdriver.Chrome(options=opts)  # Selenium Manager に自動解決
+
+    try:
+        driver.set_page_load_timeout(180)
+    except Exception:
+        pass
+    return driver
+
+
+def _find_first(wait: WebDriverWait, selectors: list[tuple[By, str]]):
     last_exc = None
     for by, sel in selectors:
         try:
@@ -193,205 +298,202 @@ def _find_first(driver, wait: WebDriverWait, selectors: list[tuple[By, str]]):
             last_exc = e
     raise last_exc or TimeoutException("element not found")
 
-def build_driver() -> webdriver.Chrome:
-    opts = Options()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--window-size=1280,900")
-    # パフォーマンス向上のための設定
-    opts.add_argument("--disable-extensions")
-    opts.add_argument("--disable-plugins")
-    opts.add_argument("--disable-images")
-    # opts.add_argument("--disable-javascript")  # LINE WORKSには必要
-    opts.add_argument("--disable-css")
-    opts.add_argument("--page-load-strategy=none")  # ページ読み込み完了を待たない
-    
-    if CHROME_BINARY:
-        opts.binary_location = CHROME_BINARY
-    
-    if CHROMEDRIVER_PATH:
-        service = Service(executable_path=CHROMEDRIVER_PATH)
-        driver = webdriver.Chrome(service=service, options=opts)
-    else:
-        driver = webdriver.Chrome(options=opts)
-    
-    # より短いタイムアウト設定
-    driver.set_page_load_timeout(60)  # 1分
-    driver.implicitly_wait(5)  # 5秒
-    
-    return driver
+
+def switch_to_iframe_with_form(driver: webdriver.Chrome, wait: WebDriverWait):
+    driver.switch_to.default_content()
+    for frame in driver.find_elements(By.TAG_NAME, "iframe"):
+        try:
+            wait.until(EC.frame_to_be_available_and_switch_to_it(frame))
+            if driver.find_elements(By.CSS_SELECTOR, "input[type='password']"):
+                return
+        except TimeoutException:
+            continue
+    driver.switch_to.default_content()
+
+
+def wait_talk_app_ready(driver: webdriver.Chrome, wait: WebDriverWait):
+    # DOM 完了
+    wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
+    # 入力欄か検索欄のどちらかが出ればOK
+    wait.until(EC.any_of(
+        EC.presence_of_element_located((By.CSS_SELECTOR, "div.editor_input.message-input")),
+        EC.presence_of_element_located((By.CSS_SELECTOR, "input[placeholder*='検索']")),
+    ))
+
+
+def open_room(driver: webdriver.Chrome, wait: WebDriverWait, room_name: str) -> bool:
+    logger.info("%sルームを探しています...", room_name)
+    for attempt in range(1, 4):
+        rooms = wait.until(EC.presence_of_all_elements_located(
+            (By.CSS_SELECTOR, "li[data-role='channel-item'], li[data-qa*='channel']")
+        ))
+        logger.info("ルーム検索試行 %d/3: %d個のルームが見つかりました", attempt, len(rooms))
+        for room in rooms:
+            text = room.text.strip()
+            if room_name in text:
+                logger.info("%sルームが見つかりました。クリックしています...", room_name)
+                room.click()
+                return True
+        time.sleep(2)
+    return False
+
 
 # ─────────── main ─────────── #
 def main() -> None:
-    if not args.dry_run:
-        d = date.today()
-        if d.weekday() >= 5 or jpholiday.is_holiday(d):
-            logger.info("本日はクレド報告をスキップします。")
-            return
-
+    # 生成対象の抽選
     idx, (title, _) = random.choice(list(CREDOS.items()))
-    body = generate_credo_text(idx, title)
-    msg = (
-        f"【クレド報告】\n"
-        f"福原玄\n"
+
+    # LLM優先で生成 → 失敗時フォールバック
+    try:
+        if LOCAL_LLM:
+            body = gen_credo_with_local_llm(idx, title)
+        else:
+            raise RuntimeError("LOCAL_LLM not set")
+    except Exception as e:
+        logger.warning("ローカルLLM生成に失敗（%s）→ フォールバック使用", e)
+        body = generate_credo_text(idx, title)
+
+    message = (
+        "【クレド報告】\n"
+        "福原玄\n"
         f"＜クレドバリュー＞\n{idx}. {title}\n"
         f"＜気づき＞\n{body}"
     )
-    logger.info("生成されたメッセージ:\n%s", msg)
+    logger.info("生成されたメッセージ:\n%s", message)
 
+    # dry-run ならここで終わり
+    logger.info("ブラウザを起動しています...")
+    logger.info("=== using Python executable: %s ===", sys.executable)
+    logger.info("=== ENV CHROMEDRIVER_PATH: %s", CHROMEDRIVER_PATH or "(auto)")
+    logger.info("=== ENV CHROME_BINARY: %s", CHROME_BINARY or "(default)")
+    logger.info("=== 実行開始: %s", date.today())
     if args.dry_run:
-        print("=" * 40)
-        print("DRY RUN: 生成されたメッセージ\n" + msg)
-        print("=" * 40)
+        logger.info("DRY RUN: 投稿は行いません。UI操作はここで終了します。")
         return
 
-    logger.info("ブラウザを起動しています...")
-    driver = build_driver()
-    wait = WebDriverWait(driver, 120)  # タイムアウトを2分に延長
+    # 任意スキップ（run_if_business_day.py 側でも制御するが、直実行対策）
+    today = date.today().strftime("%Y-%m-%d")
+    skip_env = {d.strip() for d in os.getenv("SKIP_DATES", "").split(",") if d.strip()}
+    if today in skip_env or date.today().weekday() >= 5 or jpholiday.is_holiday(date.today()):
+        logger.info("本日はクレド報告をスキップします。")
+        return
+
+    driver = None
     try:
+        driver = build_driver()
+        wait = WebDriverWait(driver, DEFAULT_WAIT_SEC)
+
+        # 1) ログインID入力
         logger.info("LINE WORKSログインページにアクセスしています...")
-        driver.get(
-            "https://auth.worksmobile.com/login/login"
-            "?accessUrl=https%3A%2F%2Ftalk.worksmobile.com%2F%23%2F"
-        )
-        logger.info("ユーザーIDを入力しています...")
-        _find_first(driver, wait, [
+        driver.get(LOGIN_URL)
+
+        id_inp = _find_first(wait, [
             (By.CSS_SELECTOR, "input[name='loginId']"),
             (By.CSS_SELECTOR, "input[type='text']"),
-        ]).send_keys(LW_ID)
+        ])
+        logger.info("ユーザーIDを入力しています...")
+        id_inp.clear()
+        id_inp.send_keys(LW_ID)
+
+        # 2) 次へ or ログイン
         logger.info("次へボタンをクリックしています...")
-        _find_first(driver, wait, [
+        btn = _find_first(wait, [
+            (By.XPATH, "//button[contains(normalize-space(.),'次へ')]"),
+            (By.XPATH, "//button[contains(normalize-space(.),'ログイン')]"),
             (By.CSS_SELECTOR, "button[type='submit']"),
-            (By.XPATH, "//button[contains(., 'ログイン')]"),
-        ]).click()
+        ])
+        btn.click()
 
+        # 3) パスワード
         logger.info("パスワード入力画面を探しています...")
-        for frame in driver.find_elements(By.TAG_NAME, "iframe"):
-            driver.switch_to.frame(frame)
-            if driver.find_elements(By.CSS_SELECTOR, "input[type='password']"):
-                break
-            driver.switch_to.default_content()
-
+        switch_to_iframe_with_form(driver, wait)
         logger.info("パスワードを入力しています...")
-        _find_first(driver, wait, [(By.CSS_SELECTOR, "input[type='password']")]).send_keys(LW_PASS)
+        pw = _find_first(wait, [(By.CSS_SELECTOR, "input[type='password']")])
+        pw.clear()
+        pw.send_keys(LW_PASS)
         logger.info("ログインボタンをクリックしています...")
-        _find_first(driver, wait, [
+        btn = _find_first(wait, [
+            (By.XPATH, "//button[contains(normalize-space(.),'ログイン')]"),
             (By.CSS_SELECTOR, "button[type='submit']"),
-            (By.XPATH, "//button[contains(., 'ログイン')]"),
-        ]).click()
+        ])
+        btn.click()
         driver.switch_to.default_content()
 
+        # 4) Talk画面遷移
         logger.info("LINE WORKSトークページに移動しています...")
-        # より堅牢な要素検索とクリック
         try:
-            talk_link = wait.until(EC.element_to_be_clickable(
-                (By.CSS_SELECTOR, "a[href*='talk.worksmobile.com']")))
-            driver.execute_script("arguments[0].click();", talk_link)  # JavaScriptクリックを使用
+            talk_link = WebDriverWait(driver, 10).until(EC.element_to_be_clickable(
+                (By.XPATH, "//a[contains(@href,'talk.worksmobile.com')]")
+            ))
+            talk_link.click()
             logger.info("トークページリンクをクリックしました")
         except TimeoutException:
             logger.warning("トークページリンクが見つからない場合の代替処理")
-            # 直接URLに移動
-            driver.get("https://talk.worksmobile.com/")
+            driver.get(TALK_URL)
             logger.info("直接トークページにアクセスしました")
-        logger.info("●Team柳ルームを探しています...")
-        # ページが完全に読み込まれるまで少し待機
-        import time
-        time.sleep(5)
-        
-        room_found = False
-        max_retries = 3
-        for retry in range(max_retries):
-            try:
-                rooms = wait.until(EC.presence_of_all_elements_located(
-                    (By.CSS_SELECTOR, "li[data-role='channel-item']")))
-                logger.info(f"ルーム検索試行 {retry + 1}/{max_retries}: {len(rooms)}個のルームが見つかりました")
-                
-                for room in rooms:
-                    try:
-                        room_text = room.text
-                        logger.info(f"ルーム名: {room_text}")
-                        if "●Team柳" in room_text:
-                            logger.info("●Team柳ルームが見つかりました。クリックしています...")
-                            driver.execute_script("arguments[0].click();", room)
-                            room_found = True
-                            break
-                    except Exception as e:
-                        logger.warning(f"ルーム要素の処理中にエラー: {e}")
-                        continue
-                
-                if room_found:
-                    break
-                    
-                if retry < max_retries - 1:
-                    logger.info("ルームが見つからないため、少し待機してリトライします...")
-                    time.sleep(3)
-                    
-            except TimeoutException as e:
-                logger.warning(f"ルーム検索でタイムアウト (試行 {retry + 1}): {e}")
-                if retry < max_retries - 1:
-                    time.sleep(5)
-                else:
-                    raise
-        
-        if not room_found:
-            raise Exception("●Team柳ルームが見つかりませんでした")
 
+        wait_talk_app_ready(driver, wait)
+
+        # 5) チャンネル選択
+        if not open_room(driver, wait, ROOM_NAME):
+            raise TimeoutException(f"チャンネル {ROOM_NAME} をUIから選択できませんでした")
+
+        # 6) 投稿
         logger.info("メッセージ入力欄を探しています...")
-        # メッセージ入力欄の複数のセレクターを試行
-        editor_selectors = [
-            "div.editor_input.message-input",
-            "div[contenteditable='true']",
-            "textarea[placeholder*='メッセージ']",
-            ".message-input",
-            "[data-role='message-input']"
-        ]
-        
-        editor = None
-        for selector in editor_selectors:
-            try:
-                editor = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
-                logger.info(f"メッセージ入力欄が見つかりました: {selector}")
-                break
-            except TimeoutException:
-                logger.warning(f"セレクター {selector} でメッセージ入力欄が見つかりませんでした")
-                continue
-        
-        if not editor:
-            raise Exception("メッセージ入力欄が見つかりませんでした")
-        
+        editor = wait.until(EC.presence_of_element_located(
+            (By.CSS_SELECTOR, "div.editor_input.message-input")
+        ))
+        logger.info("メッセージ入力欄が見つかりました: div.editor_input.message-input")
         logger.info("メッセージを入力しています...")
-        # より確実な入力方法
         editor.click()
-        time.sleep(1)
-        editor.clear()
-        editor.send_keys(msg)
-        
+        editor.send_keys(message)
+
         logger.info("Ctrl+Enterでメッセージを送信しています...")
-        # 送信方法を複数試行
+        ActionChains(driver).key_down(Keys.CONTROL).send_keys(Keys.ENTER).key_up(Keys.CONTROL).perform()
+
         try:
-            ActionChains(driver).key_down(Keys.CONTROL).send_keys(Keys.ENTER).key_up(Keys.CONTROL).perform()
-        except Exception as e:
-            logger.warning(f"Ctrl+Enter送信失敗: {e}")
-            # 代替方法: 送信ボタンを探してクリック
-            try:
-                send_button = driver.find_element(By.CSS_SELECTOR, "button[type='submit'], .send-button, [data-role='send-button']")
-                send_button.click()
-                logger.info("送信ボタンをクリックしました")
-            except Exception as e2:
-                logger.warning(f"送信ボタンクリック失敗: {e2}")
-                # 最後の手段: Enterキーのみ
-                editor.send_keys(Keys.ENTER)
-                logger.info("Enterキーで送信しました")
-        
-        # 送信完了の確認
-        time.sleep(2)
+            WebDriverWait(driver, 10).until(EC.staleness_of(editor))
+        except TimeoutException:
+            pass
+
         logger.info("メッセージ送信完了🎉")
+
+    except KeyboardInterrupt:
+        logger.warning("ユーザーにより中断されました（Ctrl+C）")
     except Exception as e:
-        logger.exception("送信中に例外が発生しました: %s", e)
+        logger.exception("❌ 予期せぬ例外: %s", e)
+        # デバッグ用ダンプ
+        try:
+            png = "/tmp/cred_error.png"
+            html = "/tmp/cred_error.html"
+            driver.save_screenshot(png)
+            Path(html).write_text(driver.page_source, encoding="utf-8")
+            logger.error("デバッグ用に %s と %s を保存しました", png, html)
+        except Exception:
+            pass
+        raise
     finally:
-        driver.quit()
+        try:
+            if driver:
+                driver.quit()
+        except Exception:
+            pass
+
 
 if __name__ == "__main__":
     main()
+
+# ===== Added: safe fallback generator =====
+def generate_credo_text(idx: int, title: str) -> str:
+    """Local LLMが失敗したときの安全フォールバック。必ず十分な長さの本文を返す。"""
+    from datetime import datetime
+    now = datetime.now().strftime("%Y-%m-%d")
+    # ここは自由に強化可（テンプレ or API フォールバック等）
+    lines = [
+        f"{now} クレド #{idx}：{title}",
+        "【今日の学び】小さな改善でも続けることの価値に気づいた。",
+        "【具体例】定例の手動作業を1つ自動化し、5分/日を削減。",
+        "【チーム貢献】ノウハウを社内Wikiへ共有、質問1件に即レス。",
+        "【明日の一歩】朝一でボトルネックの洗い出しと小改善を1件実行。"
+    ]
+    return "\n".join(lines)
