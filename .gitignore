@@ -213,3 +213,11 @@ __marimo__/
 .env*
 models/
 
+.venv/
+.env
+*.log
+cron_logs/
+__pycache__/
+.DS_Store
+*.sqlite
+*.pyc
