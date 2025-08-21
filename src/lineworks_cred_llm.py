@@ -1,12 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-lineworks_cred_llm.py – クレド自動投稿（OllamaのローカルLLMを優先使用）
-- LOCAL_LLM が設定されていれば Ollama 経由で生成
-- 失敗時は事前定義クレドからランダムにフォールバック
-- --dry-run ならログイン操作までは実施せず投稿もしない（生成のみ）
-"""
-
 from __future__ import annotations
 
 import os
@@ -167,6 +158,21 @@ CREDOS = {
         "微細な分析を怠らず、最適解を追求し続ける。",
     ]),
 }
+
+def generate_credo_text(idx: int, title: str) -> str:
+    """Local LLMが失敗したときの安全フォールバック。必ず十分な長さの本文を返す。"""
+    from datetime import datetime
+    now = datetime.now().strftime("%Y-%m-%d")
+    # ここは自由に強化可（テンプレ or API フォールバック等）
+    lines = [
+        f"{now} クレド #{idx}：{title}",
+        "【今日の学び】小さな改善でも続けることの価値に気づいた。",
+        "【具体例】定例の手動作業を1つ自動化し、5分/日を削減。",
+        "【チーム貢献】ノウハウを社内Wikiへ共有、質問1件に即レス。",
+        "【明日の一歩】朝一でボトルネックの洗い出しと小改善を1件実行。"
+    ]
+    return "\n".join(lines)
+
 
 # ─────────── 後処理強化 ─────────── #
 JPN_RE = re.compile(r"[^\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF。、：]")
@@ -483,17 +489,3 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
-# ===== Added: safe fallback generator =====
-def generate_credo_text(idx: int, title: str) -> str:
-    """Local LLMが失敗したときの安全フォールバック。必ず十分な長さの本文を返す。"""
-    from datetime import datetime
-    now = datetime.now().strftime("%Y-%m-%d")
-    # ここは自由に強化可（テンプレ or API フォールバック等）
-    lines = [
-        f"{now} クレド #{idx}：{title}",
-        "【今日の学び】小さな改善でも続けることの価値に気づいた。",
-        "【具体例】定例の手動作業を1つ自動化し、5分/日を削減。",
-        "【チーム貢献】ノウハウを社内Wikiへ共有、質問1件に即レス。",
-        "【明日の一歩】朝一でボトルネックの洗い出しと小改善を1件実行。"
-    ]
-    return "\n".join(lines)
